@@ -1,0 +1,681 @@
+---
+title: "Práctica 2 - Aprendizaje Computacional"
+author: "Arturo Lorenzo Hernandez & Alejandro Martínez Pérez (G 1.2)"
+output:
+  html_document:
+    df_print: paged
+    highlight: kate
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+En esta práctica vamos a realizar un estudio de Machine Learning sobre el conjunto mnist.
+Este conjunto esta basado en imagenes de 28*28, donde cada celda está valuada del 0 al 255, y representan imágenes de numeros del 0 al 9.
+Nuestro objetivo es encontrar un modelo de ML capaz de predecir, dada una nueva imagen, qué numero representa. Para ello, vamos a probar algoritmos de estudio sobre los datos, en la práctica emplearemos dos técnicas para reducir variables del conjunto mnist original, PCA y RFE, ya que esto nos va ayudar computacionalmente a que los entrenamientos de nuestros modelos sean más rápidos. En cuanto a la precisión, lo tendremos que estudiar comparando los mejores modelos resultantes de aplicar estas técnicas con el resultado del mejor modelo sin aplicar ninguna reducción de características.
+
+Antes de empezar especificaremos las características de la máquina en la que se han ejecutado los entrenamientos.
+
+Memoria Ram: 16GB.
+Procesador: AMD Ryzen 5 3600 6-core 3.59Ghz.
+Sistema operativo: Windows 10 64 bits.
+
+A continuación vamos a cargar los conjuntos de datos de entrenamiento y test para nuestro problema de clasificación y hacer los cambios pertinentes en el conjunto para empezar con la técnica PCA.
+
+```{r, warning=FALSE}
+# Importamos mnist
+mnistTrain <- read.csv("C:/Users/ax_m2/Downloads/MNISTtraintest/mnist_train.csv")
+mnistTest <- read.csv("C:/Users/ax_m2/Downloads/MNISTtraintest/mnist_test.csv")
+
+# Librerias necesarias
+library(randomForest)
+library(naivebayes)
+library(kernlab)
+library(dplyr)
+library(party)
+library(caret)
+library(doParallel)
+
+# Semilla
+set.seed(1234)
+
+#Para que no nos salgan errores de ubicación de memoria al ejecutar entrenamientos con tamaños de datos muy grandes.
+
+memory.limit(size=30000)
+
+#Convertimos la variable resultado de los conjuntos mnisttrain y mnisttest en un factor para tomar el conjunto como un problema de clasificación.
+
+mnistTrain[, 1] <- as.factor(mnistTrain[, 1])
+mnistTest[, 1] <- as.factor(mnistTest[, 1])
+
+```
+
+Cambiamos los nombres de las columnas para mejorar la legibilidad de los conjuntos ya que hemos cogido la primera fila de cada conjunto como nombre de columnas, no nos dimos cuenta de poner el parámetro header = F al cargar los conjuntos.
+
+```{r}
+colnames(mnistTrain) <- c("Y", paste("X.", 1:784, sep = ""))
+colnames(mnistTest) <- c("Y", paste("X.", 1:784, sep = ""))
+
+```
+
+#ALGORITMOS DE MACHINE LEARNING
+
+Antes de empezar a reducir las características con la técnica PCA, vamos a explicar brevemente los algoritmos de machine learning que vamos a utilizar, y sus hiperparamétros, para entrenar nuestros modelos y de esta forma no caer en más explicaciones en los siguientes apartados. Los algoritmos que hemos elegido son de familias distintas de machine learning. Hemos elegido un algoritmo de árboles de decisión (random forest), un algoritmo de clasificación lineal (SVMlinear) y un algoritmo basado en instancias (knn-vecinos).
+
+ 
+##RANDOM FOREST
+
+Es un método bastante versátil de aprendizaje automático y nos ofrece soluciones tanto para tareas de regresión como de clasificación.
+Para problemas de clasificación, en random forest un árbol da una clasificación resultado como si fuese un voto por una clase y la clase que más votos tenga, es decir, que más árboles del bosque vote por ella es la que se queda como resultado de la predicción. Siendo un poco más formales, dado un conjunto de entrenamiento como el mnistTrain que tiene 60k de ejemplares, unos cuantos de esos 60k se toman aleatoriamente para construir un arbol i, esta muestra se reemplaza por cada árbol creado y como es en el caso del conjunto mnist que tenemos 784 variables que definen un dígito, para cada nodo de un árbol se eligen m variables siendo m < 784. De este modo se va creando un árboles que crecen hasta su máxima extensión posible. 
+
+En caret encontramos el siguiente hiperparámetro de tuning para este algoritmo.
+
+```{r}
+# Observamos cuales son los hiperparámetros del algoritmo de rf
+modelLookup(("rf"))
+```
+
+Este hiperparámetro mtry explica el número de características aleatorias que se eligen en los nodos de cada ramificación de un árbol de decisión. Siguiendo con la nomenclatura de la explicación sería la variable m.
+
+##SVMLINEAR
+
+Support Vector Machine o máquinas de vectores de soporte, son un conjunto de algoritmos de aprendizaje supervisado que ofrecen soluciones tanto para problemas de clasificación como de regresión. Dado los datos etiquetados de un conjunto como es el mnist genera hiperplanos óptimos que separan los datos por clases, en nuestro caso intentará generar un hiperplano por cada dígito. La región delimitada por cada hiperplano se denomina margen y el objetivo de SVM es maximizar este margen para que se pueda establecer la máxima separación posible entre las clases y mejorar de esta forma su capacidad de generalización.
+
+En caret encontramos el siguiente hiperparámetro de tuning para este algoritmo.
+
+```{r}
+# Observamos cuales son los hiperparámetros del algoritmo de svmlinear
+modelLookup(("svmLinear"))
+```
+
+Este hiperparámetro C controla el número y severidad de las violaciones posibles del margen, si C = ∞, esto quiere decir que el coste por violación es muy alto y se intenta que ninguna observación puede estar en el lado incorrecto del hiperplano (si esto es posible), y por contra con un C muy bajo indicamos que toleramos que haya observaciones que no estén en la lado correcto del hiperplano.
+
+##KNN-VECINOS
+
+K vecinos más cercanos es un algoritmo no paramétrico, es decir, no hace suposiciones explícitas sobre la forma funcional de los datos, de esta forma evita modelar mal la distribución subyacente de los datos para un problema de regresión o clasificación. En vez de generar un modelo en base a la forma de los datos lo que hace es memorizar las instancias de entrenamiento para utilizarlas como conocimiento cuando estemos en la fase de predicción. Lo que conlleva esto es que se necesite un gran tamaño en memoria y un tiempo muy elevado para la predicción de los datos. La particularidad de este algoritmo es que busca alrededor de la instancia a predecir, k instancias más cercanas en función de la distancia euclídea (se pueden utilizar otras medidas) y de esas k la clase que más sea representada por las instancias vecinas será la clase resultado para la instancia a predecir. Lo podemos resumir en 3 pasos:
+
+1. Calcular la distancia euclídea.
+2. Encontrar los vecinos con esa distancia.
+3. Elegir la clase ganadora en función de las clases de los vecinos.
+
+En caret encontramos el siguiente hiperparámetro de tuning para este algoritmo.
+
+```{r}
+# Observamos cuales son los hiperparámetros del algoritmo de knn
+modelLookup(("knn"))
+```
+
+El hiperparámetro k indica el número de vecinos que hay que encontrar en función de la distancia calculada para la instancia a predecir. Este dato es decisivo para el buen funcionamiento del algoritmo.
+
+# PCA
+
+En este apartado vamos a hacer un tratamiento PCA antes de obtener el modelo de Machine Learning. 
+Este método consiste en encontrar las componentes principales más destacables en los datos; estas componentes se obtienen buscando las variables con más varianza utilizando sus autovalores y autovectores.
+
+
+## Preparación de datos
+
+En primer lugar vamos a construir los eigenvectors mediante la función 'prcomp' y vamos a sacar la cantidad suficiente de estos como para tener una buena predicción.
+
+
+```{r}
+# Sacamos los loadings
+pca_result <- prcomp(mnistTrain[,-1])
+# Estudiamos la "importancia" de cada componente
+VE <- pca_result$sdev^2
+PVE <- VE / sum(VE)
+# Escogiendo los 80 mejores componentes principales
+sum(PVE[1:70])
+# Escogiendo los 90 mejores componentes principales
+sum(PVE[1:90])
+# Escogiendo los 100 mejores componentes principales
+sum(PVE[1:110])
+```
+
+Como podemos ver, la opción que más nos interesa es escoger los 90 mejores componentes principales.
+Y con esto ya hemos creado los loadings con los eigenvector necesarios para transformar nuestros datos.
+
+```{r}
+pcaMnist = as.data.frame(mnistTrain[,1])
+mnistTrainPCA <- cbind(pcaMnist, pca_result$x[,1:90])
+
+#Para crear el conjunto mnistTestPCA tenemos que aplicar los 90 loadings a los datos del conjunto mnistTest para crear las componentes principales.
+mnistTestPCA = data.frame(matrix(ncol=90,nrow=9999))
+
+pca_loadings = pca_result$rotation[,1:90]
+
+for (i in (1:90)) {            
+    mnistTestPCA[,i] <- as.matrix(mnistTest[,-1]) %*% pca_loadings[,i]
+}
+for( i in (1:90)){
+  mnistTestPCA[,i] <- as.numeric(mnistTestPCA[,i])
+}
+mnistTestPCA  <- cbind(mnistTest$Y, mnistTestPCA)
+
+#Ponemos los mismos nombres a las columnas de los 2 conjuntos PCAs
+colnames(mnistTrainPCA) <- c("Y", paste("X.", 1:90, sep = ""))
+colnames(mnistTestPCA) <- c("Y", paste("X.", 1:90, sep = ""))
+
+```
+
+
+## ESTUDIO DE MEJORES HIPERPARAMETROS
+
+##REDUCIR CONJUNTO MNIST TRAIN PCA
+
+Para el estudio de los hiperparámetros de los algoritmos vamos a coger una cantidad de ejemplares reducida del conjunto mnistTrainPCA para probar los distintos hiperparámetros de los algoritmos que hemos escogido y así ver que configuración es la mejor con cada uno de ellos. Después cogeremos subintervalos de estas configuraciones para el conjunto completo. Además vamos a comprobar que la partición de datos que cogemos es representativa respecto a la original con dos gráficos de tarta señalando la cantidad de representación que tiene cada clase.
+
+```{r}
+#cogemos la variable de salida
+resTable <- table(mnistTrainPCA$Y) 
+
+#gráfico de tarta
+par(mfrow = c(1, 1)) 
+percentage <- round(resTable/sum(resTable) * 100)
+
+# Gráfico de la distribución original
+labels <- paste0(row.names(resTable), " (", percentage, "%) ") 
+pie(resTable, labels = labels, main = "NÚMERO TOTAL DE DIGITOS ENTRENAMIENTO")
+
+# Cogemos 1000 ejemplares de los 60000 del conjunto mnistTrainPCa.
+pca_train <- mnistTrainPCA[sample(nrow(mnistTrainPCA),1000),]
+
+#Gráfico de la distribución de la partición
+resTable <- table(pca_train$Y) 
+pie(resTable, labels = labels, main = "NÚMERO TOTAL DE DIGITOS ENTRENAMIENTO")
+
+```
+Vemos que la partición si es representativa ya que se distribuye de manera similar a la original en cuanto a la cantidad de datos que pertenecen a una clase concreta.
+
+
+El TrainControl será el mismo para todos los estudios realizados. Este control de entrenamiento consiste en repetir el entrenamiento usando cross-validation con 5 pliegues.
+
+```{r}
+# Creamos el Train Control
+trControl = trainControl(method = "cv", number = 5, summaryFunction=multiClassSummary)
+```
+
+A continuación vamos a pasar a probar distintas configuraciones en el entrenamiento de los datos reducidos con paralelización para que sea más rápido el proceso. La máquina de entrenamiento tiene 6 núcleos así que destinaremos 4 para el entrenamiento y los otros 2 para el SO y las tareas de usuario.
+
+### SVM Lineal
+
+Sabiendo que el hiperparámetro C mide el coste de violar los margenes de un hiperplano vamos a probar en caso de C = ∞ ,valores de C intermedios y valores de C muy bajos.
+
+```{r}
+# Creamos el Grid
+svmlGrid = expand.grid(C = c(1,100,1000,10000,100000,1000000))
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+trainpca_modelo.svmlinear <- train(pca_train[,-1], pca_train[,1], method='svmLinear', tuneGrid = svmlGrid, trControl = trControl)
+
+stopCluster(cl)
+
+trainpca_modelo.svmlinear$results[c('C', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(trainpca_modelo.svmlinear)
+
+```
+
+Como podemos observar en la gráfica anterior el uso del hiperparámetro C para nuestro problema de clasificación con PCA es indeferente. La separación de los márgenes de los hiperplanos para definir las clases se podría decir que es óptima con cualquier valor de C.
+
+
+### Random Forest
+
+El hiperparámetro mtry señala las características m que se van a elegir aleatoriamente en cada nodo de los árboles de decisión, como en PCA hemos reducido el conjunto de características a 90 vamos a utilizar el intervalo 1:90. Aquí también podemos observar un hiperparámetro en la función train del algoritmo random forest que es ntree, el número máximo de árboles a generar en el bosque, vamos a poner un número razonable para que se utilicen todos los ejemplares del conjunto reducido que son 1000.
+
+```{r}
+# Creamos el Grid
+rfGrid = expand.grid(mtry = c(1:90))
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+trainpca_modelo.rf <- train(pca_train[,-1], pca_train[,1], 
+                                 method='rf', 
+                                 ntree=50,
+                                 tuneGrid = rfGrid, 
+                                 trControl = trControl)
+
+stopCluster(cl)
+
+trainpca_modelo.rf$results[c('mtry', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(trainpca_modelo.rf)
+```
+
+En la gráfica observamos que en 9 características por nodo alcanzamos el punto pico de precisión y a medida que aumenta vamos viendo que la precisión va descendiendo a picos. Para el conjunto completo de datos utilizaremos un intervalo cercano al 9. (5:15)
+
+### Knn-Vecinos
+
+El hiperparámetro k es decisivo para este algoritmo así que vamos a probar hasta 50 vecinos posibles en los que poder basarse para realizar la predicción de la instancia.
+
+```{r}
+# Creamos el Grid
+knnGrid = expand.grid(k = c(1:50))
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+trainpca_modelo.knn <- train(pca_train[,-1], pca_train[,1], 
+                               method='knn', 
+                               tuneGrid = knnGrid, 
+                               trControl = trControl)
+stopCluster(cl)
+
+trainpca_modelo.knn$results[c('k', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(trainpca_modelo.knn)
+
+```
+
+Como vemos en la gráfica podemos detectar una tendencia bajista a medida que aumentamos el número de vecinos, por eso nos quedaremos con el intervalo 1:10 para el conjunto completo.
+
+##ENTRENAMIENTO CON MEJORES HIPERPARÁMETROS.
+
+A continuación vamos a entrenar el conjunto completo de datos mnistTrainPCA con los intervalos de hiperparámetros acotados en el apartado anterior.
+
+### SVM Lineal
+
+Cogemos un valor único ya que el hiperparámetro en este caso es indiferente.
+
+```{r}
+svmlGrid = expand.grid(C = 1)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+system.time(
+  trainpca_modelo.svmlinear <- train(mnistTrainPCA[,-1], 
+                                     mnistTrainPCA[,1], 
+                                     method='svmLinear', 
+                                     tuneGrid = svmlGrid, 
+                                     trControl = trControl)
+)
+stopCluster(cl)
+trainpca_modelo.svmlinear$results[c('C', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+```
+
+En la máquina en la que lo hemos ejecutado, ha tardado cerca de 10 minutos en ejecutarse y hemos conseguido una accuracy de 0.93.
+
+### RANDOM FOREST
+
+Cogemos un intervalo cercano a mtry = 9 como mencionamos antes. Por ejemplo 5:15. Y vamos a triplicar el número de árboles utilizados ya que tenemos más datos de entrenamiento y queremos que se utilicen todos en el entrenamiento.
+
+```{r}
+rfGrid = expand.grid(mtry = 5:15)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+system.time(
+trainpca_modelo.rf <- train(mnistTrainPCA[,-1], 
+                            mnistTrainPCA[,1],
+                            ntree=150,
+                            method='rf', 
+                            tuneGrid = rfGrid, 
+                            trControl = trControl)
+)
+
+stopCluster(cl)
+trainpca_modelo.rf$results[c('mtry', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+```
+
+En la máquina en la que lo hemos ejecutado ha tardado 20 minutos en ejecutarse y da una precisión de 0.95.
+
+### Knn-Vecinos
+
+Cogemos el intervalo mencionado previamente 1:10 vecinos.
+
+```{r}
+knnGrid = expand.grid(k = 1:10)
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+system.time(
+trainpca_modelo.knn <- train(mnistTrainPCA[,-1], 
+                             mnistTrainPCA[,1], 
+                             method='knn', 
+                             tuneGrid = knnGrid, 
+                             trControl = trControl)
+)
+stopCluster(cl)
+trainpca_modelo.knn$results[c('k', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+```
+
+En la máquina en la que lo hemos ejecutado ha tardado 30 minutos en ejecutarse y da una precisión de 0.97516.
+
+## Mejor modelo con PCA
+
+En vista de los resultados anteriores nosotros creemos mejor el modelo random forest ya que aunque no tenga la mejor precisión, tiene una precisión bastante alta y KNN-Vecinos tarda el 50% más de tiempo para únicamente ganar un 2% de precisión.
+
+###Evaluación del Mejor modelo PCA
+
+A continuación, vamos a ver como funciona en la realidad el mejor modelo PCA haciendo una predicción de 9999 dígitos diferentes a los del entrenamiento. 
+
+```{r}
+# Validación para random forest
+MLmetrics::Accuracy(predict(trainpca_modelo.rf, mnistTestPCA[,-1]), mnistTestPCA[,1])
+```
+
+Si nos fijamos la precisión del entrenamiento al test dista de casi un 20%, esto puede deberse a que el modelo tiene sobre entrenamiento. Por tanto, vamos a probar con Knn-Vecinos a ver si los resultados de training son reales.
+
+```{r}
+# Validación para random forest
+MLmetrics::Accuracy(predict(trainpca_modelo.knn, mnistTestPCA[,-1]), mnistTestPCA[,1])
+```
+
+Aquí si que vemos un modelo realmente bien entrenado, la precisión de test nos da un 92% respecto al 97% que teníamos en training. Aunque KNN-vecinos tarde más, el resultado real es mucho mejor que el modelo de random forest así que nuestra elección será el modelo con el algoritmo knn-vecinos.
+
+# RFE
+
+La selección de características es una técnica que selecciona un subconjunto de las características más releventas para un conjunto de datos. Esto se hace para que los algoritmos de machine learning se ejecuten de manera más eficiente en espacio y tiempo. Nosotros vamos a utilizar la técnica RFE como un wrapper en el que utiliza un algoritmo de machine learning en el núcleo, se van realizando distintas configuraciones y se van clasificando las características por importancia hasta que al final se quede el número deseado.
+
+
+Como algoritmo en primera instancia pensamos en utilizar una versión personalizada de random forest creamos nuestro propio objeto rfFuncs con un menor número de árboles, en concreto probamos con 100 árboles.
+
+```{r} 
+#Creamos nuestro propio objeto rfFuncs con un menor número de árboles para el alogoritmo 
+#randomforest, establecemos un número más bajo que el por defecto, ponemos ntree=100, para ver si nos mejora en tiempo y precisión la extracción de características.
+
+fit100 <- function (x, y, first, last, ...) 
+{
+    loadNamespace("randomForest")
+    randomForest::randomForest(x, y, importance = TRUE, ntree=100, ...)
+}
+
+rfFuncs100 <- list(summary=rfFuncs$summary, fit= fit100, pred=rfFuncs$pred, rank=rfFuncs$rank, selectSize=rfFuncs$selectSize,
+                   selectVar= rfFuncs$selectVar)
+                   
+```
+
+##REDUCCIÓN DE CARACTERISTICAS
+
+Tras varias pruebas vimos que treebagfuncs seguía siendo mejor aún así que nuestro random forest personalizado por eso lo escogemos para RFE. Ejecutamos el RFE en paralelo con 4 cores, ya que la máquina tiene 6 y hay que dejar libres para el SO y otras tareas. Indicamos que queremos como máximo que nos quedemos con 160 características y 4  pliegues de validación cruzada (CV).
+
+```{r}
+
+#Separamos el conjunto de predictores de la columna que tiene la variable resultado.
+
+predictors = mnistTrain[,-1]
+outcome = mnistTrain[,1]
+
+ cl <- makePSOCKcluster(4)
+ registerDoParallel(cl)
+ 
+ lmProfile = rfe(predictors, outcome,
+                 sizes = c(40,80,120,160),
+                 rfeControl = rfeControl(functions = treebagFuncs,
+                                         method = "cv",
+                                         number = 4,
+                                         returnResamp = "all",
+                                         verbose = FALSE))
+stopCluster(cl)
+lmProfile
+
+```
+
+Vemos que con 40 variables ya tenemos el 88% de la variabilidad explicada. El doble de variables nos da un 4% más, pero nosotros no creemos que sea una mejor opción, ya que aumentará el tiempo de probar los modelos.
+
+Cogemos del conjunto MNIST principal uno reducido en columnas con los índices que nos da lmprofile. Esos índices son las características que RFE ha considerado principales. Como para RFE el mejor ajuste es con 784 variables y nosotros buscamos el ajuste con las 40 variables tenemos que buscar en la estructura de lmProfile esas 40 variables en el último fold del cross validation.
+
+```{r}
+
+resultados = lmProfile$variables
+resultados.40 = resultados[(resultados$Variables == 40 & resultados$Resample=="Fold4"),2]
+mnistTrainRFE = mnistTrain[,1]
+mnistTrainRFE = cbind(mnistTrainRFE, mnistTrain[,resultados.40] )
+
+mnistTestRFE = mnistTest[,1]
+mnistTestRFE = cbind(mnistTestRFE, mnistTest[,resultados.40] )
+
+```
+
+##REDUCIR CONJUNTO MNIST TRAIN RFE
+
+Creamos un conjunto reducido de 1000 ejemplares por útlima vez y vemos como están distribuidos los datos para ver si la partición que cogemos es representativa de los datos originales.
+
+```{R}
+#cogemos la variable de salida
+resTable <- table(mnistTrainRFE$Y) 
+
+#gráfico de tarta
+par(mfrow = c(1, 1)) 
+percentage <- round(resTable/sum(resTable) * 100)
+
+#Gráfico de distribución de datos originales.
+
+labels <- paste0(row.names(resTable), " (", percentage, "%) ") 
+pie(resTable, labels = labels, main = "NÚMERO TOTAL DE DIGITOS ENTRENAMIENTO")
+
+
+#Conjunto de 1000 ejemplares de mnistTrainRFE
+rfeReducido <- mnistTrainRFE[sample(nrow(mnistTrainRFE),1000),]
+
+#Gráfico de distribución de datos de la partición.
+resTable <- table(rfeReducido$Y) 
+pie(resTable, labels = labels, main = "NÚMERO TOTAL DE DIGITOS ENTRENAMIENTO")
+
+```
+
+##ESTUDIO DE MEJORES HIPERPARAMETROS
+
+Utilizaremos el mismo trControl de los anteriores modelos.
+
+###SVMLINEAR 
+
+Probamos con el mismo intervalo de hiperparámetros que en los modelos anteriores.
+
+```{R}
+#HiperParametros
+
+mygrid = expand.grid(C = c(1,100,1000,10000,100000,1000000))
+
+cl <- makePSOCKcluster(4)
+ registerDoParallel(cl)
+ 
+  modeloRFE.svm <- train(rfeReducido[,-1], rfeReducido[,1], 
+                         method='svmLinear', 
+                        trControl = trControl, 
+                        tuneGrid = mygrid
+                        )
+stopCluster(cl)
+
+modeloRFE.svm$results[c('C', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(modeloRFE.svm)
+
+```
+
+En este caso si vemos que hay una diferencia en el uso de distintos valores para los hiperparámetros. Parece que para costes bajos de violación de los márgenes de los hiperplanos funciona mejor. Por eso vamos a poner un intervalo pequeño de C en el conjunto completo.
+
+###RANDOM FOREST 
+
+Ahora que tenemos 40 características que definen el conjunto MNIST, el hiperparámetro mtry lo acotamos al intervalo 1:40.
+
+```{R}
+#HiperParametros
+
+mygrid = expand.grid(mtry = 1:40)
+
+cl <- makePSOCKcluster(4)
+ registerDoParallel(cl)
+ 
+  modeloRFE.rf <- train(rfeReducido[,-1], rfeReducido[,1], method='rf', 
+                        trControl = trControl,
+                        ntree = 50,
+                        tuneGrid = mygrid
+                        )
+stopCluster(cl)
+
+modeloRFE.rf$results[c('mtry', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(modeloRFE.rf)
+
+
+```
+
+Podemos ver que los mejores valores se encuentran entre los 10 primeros valores para mtry. Así que cogeremos ese intervalo para el conjunto completo.
+
+###kNN-VECINOS
+
+El intervalo de vecinos lo dejamos igual que en los anteriores modelos.
+
+```{R}
+#HiperParametros
+
+mygrid = expand.grid(k = 1:50)
+
+cl <- makePSOCKcluster(4)
+ registerDoParallel(cl)
+ 
+    modeloRFE.knn <- train(rfeReducido[,-1], rfeReducido[,1], 
+                   method = "knn", 
+                   tuneGrid = mygrid,
+                   trControl = trControl)
+    
+stopCluster(cl)
+
+modeloRFE.knn$results[c('k', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+plot(modeloRFE.knn)
+
+```
+
+Los mejores valores de precisión los encontramos en el intervalo 1:10 vecinos, este es el que usaremos para el conjunto completo.
+
+##ENTRENAMIENTO CON MEJORES HIPERPARAMETROS
+
+###SVMLINEAR
+
+Como hemos visto funciona mejor con valores pequeños de C así que vamos a coger el valor 1 como en los anteriores modelos.
+
+```{r}
+mygrid = expand.grid(C = 1)
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+system.time(
+  modeloRFE.svm <- train(mnistTrainRFE[,-1], mnistTrainRFE[,1], 
+                         method='svmLinear', 
+                        trControl = trControl, 
+                        tuneGrid = mygrid
+                        )
+)
+stopCluster(cl)
+
+modeloRFE.svm$results[c('C', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+```
+
+En la máquina ejecutada, ha tardado 5 minutos y hemos obtenido un accuracy del 0.82.
+
+###Random forest
+
+Cogemos el mejor intervalo para el hiperparamétro mtry y el triple de árboles como en los modelos anteriores.
+
+```{r}
+mygrid = expand.grid(mtry = 1:10)
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+
+system.time(
+  modeloRFE.rf <- train(mnistTrainRFE[,-1], mnistTrainRFE[,1], method='rf', 
+                        trControl = trControl,
+                        ntree = 150,
+                        tuneGrid = mygrid
+                        )
+)
+stopCluster(cl)
+
+modeloRFE.rf$results[c('mtry', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+
+```
+
+En la máquina evaluada ha tardado 8 minutos con un máximo de 0.89
+
+###kNN-VECINOS
+
+Cogemos el intervalo de 1:10 vecinos como hemos visto previamente.
+
+```{R}
+mygrid = expand.grid(k = 1:10)
+
+cl <- makePSOCKcluster(4)
+registerDoParallel(cl)
+ 
+system.time(
+    modeloRFE.knn <- train(mnistTrainRFE[,-1], 
+                   mnistTrainRFE[,1], 
+                   method = "knn", 
+                   tuneGrid = mygrid,
+                   trControl = trControl
+                   )
+    )
+
+stopCluster(cl)
+
+modeloRFE.knn$results[c('k', 'Accuracy', 'Kappa')] %>%
+  top_n(5, wt = Accuracy) %>%
+  arrange(desc(Accuracy))
+
+```
+
+En la máquina evaluada ha tardado 11 minutos y ha conseguido una accuracy máxima de 0.87
+
+##MEJOR MODELO CON RFE
+
+En base a los resultados obtenidos, creemos que el mejor modelo es sin duda el entrenado con el algoritmo random forest ya que es el mejor en tiempo y precisión obtiene un 89% de precisión en tan sólo 8 minutos.
+
+###Evaluación del Mejor modelo PCA
+
+Por último, vamos a predecir 9999 ejemplares distintos a los del entrenamiento como funciona nuestro modelo con random forest y ver si esta vez no tiene sobre entrenamiento.
+
+```{r}
+
+MLmetrics::Accuracy(predict(modeloRFE.rf, mnistTestRFE[,-1]), mnistTestRFE[,1])
+
+```
+
+Como podemos observar la precisión en entrenamiento y test es la misma, en esta ocasión random forest nos sirve muy bien para nuestro modelo con RFE. Por tanto no necesitamos ejecutar nada más y en RFE nos quedaremos con el modelo de random forest.
+
+
+#MODELO FINAL
+
+```{r}
+MLmetrics::Accuracy(predict(trainpca_modelo.knn, mnistTestPCA[,-1]), mnistTestPCA[,1])
+MLmetrics::Accuracy(predict(modeloRFE.rf, mnistTestRFE[,-1]), mnistTestRFE[,1])
+```
